@@ -8,5 +8,16 @@ __pycache__/
 .venv/
 venv/
 
+# Rust
+rust/target/
+
+# Go
+go/bin/
+go/mvp-agent
+
+# Node / TypeScript
+node_modules/
+*.tsbuildinfo
+
 # 本地环境
 .env

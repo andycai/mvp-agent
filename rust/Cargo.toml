@@ -1,0 +1,11 @@
+[package]
+name = "mvp-agent"
+version = "0.1.0"
+edition = "2021"
+description = "极简 LLM Agent(纯 Rust 标准库,无第三方依赖)"
+
+[dependencies]
+
+[[bin]]
+name = "mvp-agent"
+path = "src/mvp_agent.rs"

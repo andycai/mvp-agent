@@ -1,0 +1,16 @@
+{
+  "name": "mvp-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "极简 LLM Agent(Node 标准库,零运行时依赖)",
+  "scripts": {
+    "start": "node mvp_agent.ts",
+    "test": "node --test test_mvp_agent.test.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
