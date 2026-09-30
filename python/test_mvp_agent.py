@@ -36,16 +36,20 @@ def _assert_paired(tc, ctx):
 class TestSchemas(unittest.TestCase):
     def test_schemas_are_strict_and_complete(self):
         names = [s["function"]["name"] for s in agent.TOOL_SCHEMAS]
-        self.assertEqual(names, ["tool_exec", "tool_read", "tool_write", "tool_python"])
+        self.assertEqual(names, ["tool_bash", "tool_read", "tool_write"])
         for s in agent.TOOL_SCHEMAS:
             self.assertIs(s["function"]["parameters"]["additionalProperties"], False)
             for req in s["function"]["parameters"]["required"]:
                 self.assertIn(req, s["function"]["parameters"]["properties"])
 
+    def test_no_python_tool(self):
+        self.assertNotIn("tool_python", agent.TOOL_FUNCS)
+        self.assertNotIn("tool_exec", agent.TOOL_FUNCS)
+
 
 class TestRunTool(unittest.TestCase):
     def test_ok(self):
-        self.assertEqual(agent.run_tool(_tc("tool_python", '{"code": "print(6*7)"}')), "42")
+        self.assertEqual(agent.run_tool(_tc("tool_bash", '{"cmd": "printf hi"}')), "hi")
 
     def test_bad_json_is_returned_as_tool_error(self):
         # 关键回归:坏 JSON 不能再抛出,必须变成 tool 结果
@@ -66,8 +70,8 @@ class TestRunTool(unittest.TestCase):
         self.assertIn("必须是 JSON 对象", out)
 
     def test_non_string_arguments_do_not_crash(self):
-        out = agent.run_tool({"id": "x", "function": {"name": "tool_exec", "arguments": None}})
-        self.assertTrue(out)  # 空参数 -> {} -> 执行 "cmd" 缺失 -> TypeError,但不抛
+        out = agent.run_tool({"id": "x", "function": {"name": "tool_bash", "arguments": None}})
+        self.assertTrue(out)
         self.assertIn("[错误]", out)
 
     def test_truncation(self):
@@ -84,9 +88,57 @@ class TestRunTool(unittest.TestCase):
             os.unlink(path)
 
 
+class TestTrim(unittest.TestCase):
+    def test_short_history_untouched(self):
+        ctx = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
+        self.assertIs(agent._trim(ctx), ctx)
+
+    def test_keeps_system_and_most_recent(self):
+        ctx = [{"role": "system", "content": "s"}]
+        for i in range(30):
+            ctx += [{"role": "user", "content": f"u{i}"}, {"role": "assistant", "content": f"a{i}"}]
+        with mock.patch.object(agent, "MAX_HISTORY", 4):
+            out = agent._trim(ctx)
+        self.assertEqual(out[0]["role"], "system")
+        self.assertEqual(len(out), 5)
+        self.assertIs(out[-1], ctx[-1])
+
+    def test_never_starts_with_orphan_tool_result(self):
+        """裁剪边界落在 tool 响应上时必须继续前移,否则 call/response 被拆散 -> 400。"""
+        ctx = [{"role": "system", "content": "s"},
+               {"role": "user", "content": "u"},
+               {"role": "assistant", "content": None,
+                "tool_calls": [_tc("tool_bash", '{"cmd":"true"}', "x")]},
+               {"role": "tool", "tool_call_id": "x", "content": "out"},
+               {"role": "user", "content": "u2"},
+               {"role": "assistant", "content": "a2"}]
+        with mock.patch.object(agent, "MAX_HISTORY", 3):
+            out = agent._trim(ctx)
+        self.assertEqual(out[0]["role"], "system")
+        self.assertNotEqual(out[1]["role"], "tool")
+        self.assertEqual(out[1]["content"], "u2")
+        _assert_paired(self, out)
+
+    def test_trim_does_not_run_off_the_end(self):
+        """裁剪点落在一长串 tool 结果中间时不能越界(曾会 IndexError)。"""
+        ctx = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"},
+               {"role": "assistant", "content": None, "tool_calls": [
+                   _tc("tool_bash", '{"cmd":"t"}', "a"),
+                   _tc("tool_bash", '{"cmd":"t"}', "b"),
+                   _tc("tool_bash", '{"cmd":"t"}', "c")]},
+               {"role": "tool", "tool_call_id": "a", "content": "1"},
+               {"role": "tool", "tool_call_id": "b", "content": "2"},
+               {"role": "tool", "tool_call_id": "c", "content": "3"}]
+        with mock.patch.object(agent, "MAX_HISTORY", 2):
+            out = agent._trim(ctx)
+        # 只能整体丢弃 call+全部响应,不能留下孤儿 tool
+        self.assertEqual([m["role"] for m in out], ["system"])
+        _assert_paired(self, out)
+
+
 class TestAgentLoop(unittest.TestCase):
     def test_happy_path(self):
-        replies = [_msg(tool_calls=[_tc("tool_python", '{"code": "print(2+3)"}')]), _msg(content="答案是 5。")]
+        replies = [_msg(tool_calls=[_tc("tool_bash", '{"cmd": "printf 5"}')]), _msg(content="答案是 5。")]
         ctx = []
         with mock.patch.object(agent, "chat", side_effect=replies):
             self.assertEqual(agent.agent_loop("算 2+3", ctx), "答案是 5。")
@@ -100,7 +152,6 @@ class TestAgentLoop(unittest.TestCase):
         with mock.patch.object(agent, "chat", side_effect=replies):
             agent.agent_loop("读文件", ctx)
         _assert_paired(self, ctx)
-        # 第二轮(即下一次用户输入)仍可正常继续
         with mock.patch.object(agent, "chat", return_value=_msg(content="继续正常")) as m:
             self.assertEqual(agent.agent_loop("继续", ctx), "继续正常")
             self.assertTrue(m.called)
@@ -119,8 +170,8 @@ class TestAgentLoop(unittest.TestCase):
         self.assertIn("未知工具", tool_text)
 
     def test_multiple_tool_calls_all_paired(self):
-        replies = [_msg(tool_calls=[_tc("tool_python", '{"code":"print(1)"}', "a"),
-                                    _tc("tool_python", '{"code":"print(2)"}', "b")]), _msg(content="ok")]
+        replies = [_msg(tool_calls=[_tc("tool_bash", '{"cmd":"printf 1"}', "a"),
+                                    _tc("tool_bash", '{"cmd":"printf 2"}', "b")]), _msg(content="ok")]
         ctx = []
         with mock.patch.object(agent, "chat", side_effect=replies):
             agent.agent_loop("t", ctx)
@@ -129,12 +180,23 @@ class TestAgentLoop(unittest.TestCase):
 
     def test_max_turns(self):
         def always_tool(_ctx):
-            return _msg(tool_calls=[_tc("tool_python", '{"code":"print(0)"}')])
+            return _msg(tool_calls=[_tc("tool_bash", '{"cmd":"true"}')])
         ctx = []
         with mock.patch.object(agent, "chat", side_effect=always_tool), \
              mock.patch.object(agent, "MAX_TURNS", 3):
             out = agent.agent_loop("t", ctx)
         self.assertIn("最大轮次(3)", out)
+        _assert_paired(self, ctx)
+
+    def test_history_is_trimmed_in_place_and_pairs_survive(self):
+        """历史被原地裁剪:调用方持有的 ctx 对象也要跟着变小,且始终合法。"""
+        ctx = [{"role": "system", "content": "s"}]
+        with mock.patch.object(agent, "chat", return_value=_msg(content="ok")), \
+             mock.patch.object(agent, "MAX_HISTORY", 3):
+            for i in range(20):
+                agent.agent_loop(f"m{i}", ctx)
+        self.assertEqual(ctx[0]["role"], "system")
+        self.assertLessEqual(len(ctx), agent.MAX_HISTORY + 2)  # 有界,不随轮数增长
         _assert_paired(self, ctx)
 
     def test_context_length_error_is_hinted(self):
@@ -172,8 +234,11 @@ class TestChatHttp(unittest.TestCase):
         captured = {}
 
         class FakeResp:
-            def __enter__(self): return io.BytesIO(b'{"choices":[{"message":{"role":"assistant","content":"hi"}}]}')
-            def __exit__(self, *a): return False
+            def __enter__(self):
+                return io.BytesIO(b'{"choices":[{"message":{"role":"assistant","content":"hi"}}]}')
+
+            def __exit__(self, *a):
+                return False
 
         def fake_urlopen(req, timeout=None):
             captured["url"] = req.full_url
@@ -190,6 +255,28 @@ class TestChatHttp(unittest.TestCase):
         self.assertIn("user-agent", captured["headers"])
         self.assertEqual(captured["timeout"], agent.REQUEST_TIMEOUT)
         self.assertEqual(captured["body"]["messages"][0]["content"], "中文")
+        self.assertEqual([t["function"]["name"] for t in captured["body"]["tools"]],
+                         ["tool_bash", "tool_read", "tool_write"])
+
+
+class TestMain(unittest.TestCase):
+    def test_one_shot_mode_with_argv(self):
+        """python mvp_agent.py "任务" 应一次性执行并打印结果,不进 REPL。"""
+        out, seen = io.StringIO(), []
+
+        def fake_chat(msgs):  # ctx 是可变对象,必须当场快照
+            seen.append([dict(m) for m in msgs])
+            return _msg(content="你好")
+
+        with mock.patch.object(sys, "argv", ["mvp_agent.py", "打个招呼"]), \
+             mock.patch.object(agent, "API_KEY", "k"), \
+             mock.patch.object(agent, "chat", side_effect=fake_chat), \
+             mock.patch("logging.basicConfig"), mock.patch("sys.stdout", out):
+            agent.main()
+        self.assertIn("你好", out.getvalue())
+        self.assertNotIn("用户>", out.getvalue())
+        self.assertEqual(seen[0][0]["role"], "system")
+        self.assertEqual(seen[0][-1]["content"], "打个招呼")
 
 
 if __name__ == "__main__":
