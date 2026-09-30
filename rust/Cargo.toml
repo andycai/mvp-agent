@@ -2,9 +2,12 @@
 name = "mvp-agent"
 version = "0.1.0"
 edition = "2021"
-description = "极简 LLM Agent(纯 Rust 标准库,无第三方依赖)"
+description = "极简 LLM Agent(Rust 版,100 行以内)"
 
 [dependencies]
+serde_json = "1"
+ureq = "2"
+wait-timeout = "0.2"
 
 [[bin]]
 name = "mvp-agent"
